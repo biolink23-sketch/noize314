@@ -1,5 +1,7 @@
 import streamlit as st
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Важно для Streamlit!
 import matplotlib.pyplot as plt
 from scipy import signal
 from scipy.io import wavfile
