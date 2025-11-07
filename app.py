@@ -1,13 +1,9 @@
 import streamlit as st
 import numpy as np
-from scipy import signal
-from scipy import fft
-from scipy import stats
-import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from io import BytesIO
 import wave
-import time
+import struct
 import base64
 
 # Настройка страницы
@@ -25,279 +21,231 @@ class PinkNoiseGenerator:
         self.sample_rate = sample_rate
         self.noise = None
         
+    def generate_pink_noise_simple(self):
+        """
+        Упрощенная генерация розового шума методом суммирования октав
+        """
+        samples = int(self.duration * self.sample_rate)
+        pink_noise = np.zeros(samples)
+        num_octaves = 7
+        
+        for octave in range(num_octaves):
+            frequency = 2 ** octave
+            # Генерируем белый шум для этой октавы
+            white = np.random.randn(samples // frequency + 1)
+            
+            # Интерполируем до нужного размера
+            indices = np.arange(len(white)) * frequency
+            indices = indices[:samples // frequency + 1]
+            
+            # Простая интерполяция
+            for i in range(len(indices) - 1):
+                start_idx = indices[i]
+                end_idx = min(indices[i + 1], samples)
+                if start_idx < samples:
+                    value = white[i]
+                    pink_noise[start_idx:end_idx] += value / (octave + 1)
+        
+        # Нормализация
+        if np.max(np.abs(pink_noise)) > 0:
+            pink_noise = pink_noise / np.max(np.abs(pink_noise))
+        
+        self.noise = pink_noise
+        return pink_noise
+    
     def generate_pink_noise_fft(self, alpha=1.0):
         """
-        Генерация розового шума методом формирования спектра
-        alpha: показатель степени (1.0 для классического розового шума 1/f)
+        Генерация розового шума через FFT
         """
-        samples = self.duration * self.sample_rate
+        samples = int(self.duration * self.sample_rate)
         
-        # Генерируем белый шум в частотной области
-        freqs = np.fft.rfftfreq(samples, 1/self.sample_rate)
+        # Генерируем белый шум
+        white_noise = np.random.randn(samples)
         
-        # Создаем случайные фазы
-        phases = np.random.uniform(0, 2*np.pi, len(freqs))
+        # FFT белого шума
+        fft_white = np.fft.rfft(white_noise)
         
-        # Формируем спектр с характеристикой 1/f^alpha
-        # Избегаем деления на ноль для нулевой частоты
-        power = np.zeros_like(freqs)
-        power[0] = 1
-        power[1:] = 1 / (freqs[1:] ** alpha)
+        # Создаем фильтр 1/f^alpha
+        frequencies = np.fft.rfftfreq(samples, 1/self.sample_rate)
+        # Избегаем деления на ноль
+        frequencies[0] = 1
+        pink_filter = 1 / np.sqrt(frequencies ** alpha)
+        pink_filter[0] = pink_filter[1]
         
-        # Создаем комплексный спектр
-        spectrum = np.sqrt(power) * np.exp(1j * phases)
+        # Применяем фильтр
+        fft_pink = fft_white * pink_filter
         
-        # Обратное преобразование Фурье
-        pink_noise = np.fft.irfft(spectrum, n=samples)
+        # Обратное FFT
+        pink_noise = np.fft.irfft(fft_pink, n=samples)
         
         # Нормализация
-        pink_noise = pink_noise / np.max(np.abs(pink_noise))
+        if np.max(np.abs(pink_noise)) > 0:
+            pink_noise = pink_noise / np.max(np.abs(pink_noise))
         
         self.noise = pink_noise
         return pink_noise
     
-    def generate_pink_noise_voss(self, num_octaves=16):
-        """
-        Генерация розового шума алгоритмом Восса-Маккартни
-        Более эффективный метод для реального времени
-        """
-        samples = self.duration * self.sample_rate
-        pink_noise = np.zeros(samples)
-        
-        # Массив для хранения значений генераторов
-        generators = np.zeros(num_octaves)
-        
-        for i in range(samples):
-            # Обновляем генераторы в зависимости от позиции
-            for j in range(num_octaves):
-                if i % (2**j) == 0:
-                    generators[j] = np.random.randn()
-            
-            # Суммируем все генераторы
-            pink_noise[i] = np.sum(generators)
-        
-        # Нормализация
-        pink_noise = pink_noise / np.max(np.abs(pink_noise))
-        
-        self.noise = pink_noise
-        return pink_noise
-    
-    def apply_envelope(self, fade_in=2.0, fade_out=2.0):
+    def apply_envelope(self, fade_in=1.0, fade_out=1.0):
         """Применение огибающей для плавного начала и конца"""
         if self.noise is None:
             return
         
+        samples = len(self.noise)
         fade_in_samples = int(fade_in * self.sample_rate)
         fade_out_samples = int(fade_out * self.sample_rate)
         
-        # Создаем огибающую
-        envelope = np.ones_like(self.noise)
+        # Ограничиваем размер fade чтобы не превысить длину сигнала
+        fade_in_samples = min(fade_in_samples, samples // 4)
+        fade_out_samples = min(fade_out_samples, samples // 4)
         
-        # Плавное нарастание
         if fade_in_samples > 0:
-            envelope[:fade_in_samples] = np.linspace(0, 1, fade_in_samples)
+            fade_in_curve = np.linspace(0, 1, fade_in_samples)
+            self.noise[:fade_in_samples] *= fade_in_curve
         
-        # Плавное затухание
         if fade_out_samples > 0:
-            envelope[-fade_out_samples:] = np.linspace(1, 0, fade_out_samples)
-        
-        self.noise *= envelope
-    
-    def get_spectrum(self):
-        """Получение спектра мощности для визуализации"""
-        if self.noise is None:
-            return None, None
-        
-        # Вычисляем спектр мощности
-        freqs = np.fft.rfftfreq(len(self.noise), 1/self.sample_rate)
-        spectrum = np.abs(np.fft.rfft(self.noise))
-        
-        # Преобразуем в децибелы
-        spectrum_db = 20 * np.log10(spectrum + 1e-10)
-        
-        return freqs[1:], spectrum_db[1:]  # Исключаем нулевую частоту
+            fade_out_curve = np.linspace(1, 0, fade_out_samples)
+            self.noise[-fade_out_samples:] *= fade_out_curve
     
     def save_wav(self, volume=0.5):
         """Сохранение в WAV файл"""
         if self.noise is None:
             return None
         
-        # Создаем буфер для файла
         buffer = BytesIO()
         
-        # Применяем громкость
-        audio_data = self.noise * volume
-        
-        # Конвертируем в 16-битные целые числа
-        audio_data = np.int16(audio_data * 32767)
+        # Применяем громкость и конвертируем в 16-bit
+        audio_data = (self.noise * volume * 32767).astype(np.int16)
         
         # Создаем WAV файл
         with wave.open(buffer, 'wb') as wav_file:
-            wav_file.setnchannels(1)  # Моно
-            wav_file.setsampwidth(2)  # 16 бит
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
             wav_file.setframerate(self.sample_rate)
             wav_file.writeframes(audio_data.tobytes())
         
         buffer.seek(0)
         return buffer
     
-    def get_audio_base64(self, volume=0.5):
-        """Получить base64 представление аудио для HTML5 плеера"""
+    def get_audio_html(self, volume=0.5):
+        """Получить HTML5 audio элемент"""
         wav_buffer = self.save_wav(volume)
         if wav_buffer:
             audio_base64 = base64.b64encode(wav_buffer.read()).decode()
-            wav_buffer.seek(0)
-            return audio_base64
+            audio_html = f"""
+            <audio controls style="width: 100%;">
+                <source src="data:audio/wav;base64,{audio_base64}" type="audio/wav">
+                Ваш браузер не поддерживает аудио элемент.
+            </audio>
+            """
+            return audio_html
         return None
 
-# Интерфейс Streamlit
 def main():
     st.title("🎵 Генератор Розового Шума для Медитации")
     st.markdown("""
-    Розовый шум (1/f шум) - это сигнал со спектральной плотностью мощности, 
-    обратно пропорциональной частоте. Он широко используется для медитации, 
-    улучшения сна и концентрации.
+    **Розовый шум** - природный звук с частотной характеристикой 1/f, 
+    идеальный для медитации, концентрации и улучшения сна.
     """)
     
-    # Инициализация session state
+    # Инициализация
     if 'generator' not in st.session_state:
-        st.session_state.generator = PinkNoiseGenerator()
+        st.session_state.generator = None
     
-    if 'audio_generated' not in st.session_state:
-        st.session_state.audio_generated = False
-    
-    # Боковая панель с настройками
+    # Настройки в сайдбаре
     with st.sidebar:
-        st.header("⚙️ Настройки генератора")
+        st.header("⚙️ Настройки")
         
-        st.subheader("Параметры шума")
-        
-        # Метод генерации
-        generation_method = st.selectbox(
-            "Метод генерации",
-            ["FFT метод (точный)", "Алгоритм Восса (быстрый)"],
-            help="FFT метод дает более точный спектр, алгоритм Восса работает быстрее"
-        )
-        
-        # Длительность
         duration = st.slider(
             "Длительность (секунды)",
             min_value=5,
-            max_value=60,
-            value=30,
-            step=5,
-            help="Длительность генерируемого шума (ограничено 60 сек для веб-версии)"
+            max_value=30,
+            value=10,
+            step=5
         )
         
-        # Характеристика спектра (для FFT метода)
-        if generation_method == "FFT метод (точный)":
+        method = st.radio(
+            "Метод генерации",
+            ["Простой (октавы)", "FFT метод"]
+        )
+        
+        if method == "FFT метод":
             alpha = st.slider(
-                "Показатель спектра (α)",
+                "Характер шума (α)",
+                min_value=0.5,
+                max_value=1.5,
+                value=1.0,
+                step=0.1,
+                help="1.0 = розовый, 0.5 = ближе к белому, 1.5 = ближе к коричневому"
+            )
+        
+        use_envelope = st.checkbox("Плавные переходы", value=True)
+        
+        if use_envelope:
+            fade_time = st.slider(
+                "Время перехода (сек)",
                 min_value=0.5,
                 max_value=2.0,
                 value=1.0,
-                step=0.1,
-                help="1.0 - классический розовый шум (1/f), 0 - белый шум, 2 - броуновский шум"
-            )
-        else:
-            num_octaves = st.slider(
-                "Количество октав",
-                min_value=8,
-                max_value=24,
-                value=16,
-                step=1,
-                help="Больше октав - более точный розовый шум"
-            )
-        
-        st.subheader("Огибающая")
-        
-        # Параметры огибающей
-        use_envelope = st.checkbox("Использовать огибающую", value=True)
-        
-        if use_envelope:
-            fade_in = st.slider(
-                "Плавное нарастание (сек)",
-                min_value=0.0,
-                max_value=5.0,
-                value=2.0,
-                step=0.5
-            )
-            
-            fade_out = st.slider(
-                "Плавное затухание (сек)",
-                min_value=0.0,
-                max_value=5.0,
-                value=2.0,
                 step=0.5
             )
         
-        st.subheader("Громкость")
         volume = st.slider(
-            "Уровень громкости",
-            min_value=0.0,
+            "Громкость",
+            min_value=0.1,
             max_value=1.0,
             value=0.5,
-            step=0.05
+            step=0.1
         )
         
-        # Частота дискретизации
         sample_rate = st.selectbox(
-            "Частота дискретизации (Гц)",
-            [22050, 44100, 48000],
-            index=1,
-            help="Качество звука (44100 Гц - CD качество)"
+            "Качество",
+            [22050, 44100],
+            index=0,
+            format_func=lambda x: f"{x} Гц ({'Стандарт' if x == 22050 else 'Высокое'})"
         )
     
-    # Основной контент
-    if st.button("🎲 Генерировать розовый шум", type="primary", use_container_width=True):
-        with st.spinner("Генерация розового шума..."):
-            # Обновляем параметры генератора
-            st.session_state.generator = PinkNoiseGenerator(duration, sample_rate)
-            
-            # Генерируем шум выбранным методом
-            if generation_method == "FFT метод (точный)":
-                st.session_state.generator.generate_pink_noise_fft(alpha)
-            else:
-                st.session_state.generator.generate_pink_noise_voss(num_octaves)
-            
-            # Применяем огибающую если нужно
-            if use_envelope:
-                st.session_state.generator.apply_envelope(fade_in, fade_out)
-            
-            st.session_state.audio_generated = True
-            st.success("✅ Розовый шум успешно сгенерирован!")
+    # Основной интерфейс
+    col1, col2 = st.columns([2, 1])
     
-    # Воспроизведение и скачивание
-    if st.session_state.audio_generated and st.session_state.generator.noise is not None:
+    with col1:
+        if st.button("🎲 Генерировать розовый шум", type="primary", use_container_width=True):
+            with st.spinner("Создание розового шума..."):
+                # Создаем генератор
+                st.session_state.generator = PinkNoiseGenerator(duration, sample_rate)
+                
+                # Генерируем шум
+                if method == "Простой (октавы)":
+                    st.session_state.generator.generate_pink_noise_simple()
+                else:
+                    st.session_state.generator.generate_pink_noise_fft(alpha)
+                
+                # Применяем огибающую
+                if use_envelope:
+                    st.session_state.generator.apply_envelope(fade_time, fade_time)
+                
+                st.success("✅ Готово!")
+    
+    with col2:
+        st.info(f"⏱️ {duration} сек | 🔊 {int(volume*100)}%")
+    
+    # Воспроизведение и визуализация
+    if st.session_state.generator and st.session_state.generator.noise is not None:
         
-        st.header("🎧 Воспроизведение")
-        
-        # Получаем audio в base64 для HTML5 плеера
-        audio_base64 = st.session_state.generator.get_audio_base64(volume)
-        
-        if audio_base64:
-            # HTML5 аудио плеер
-            audio_html = f"""
-            <audio controls autoplay>
-                <source src="data:audio/wav;base64,{audio_base64}" type="audio/wav">
-                Ваш браузер не поддерживает элемент audio.
-            </audio>
-            """
+        # Аудио плеер
+        st.subheader("🎧 Прослушивание")
+        audio_html = st.session_state.generator.get_audio_html(volume)
+        if audio_html:
             st.markdown(audio_html, unsafe_allow_html=True)
-            
-            st.info(f"📢 Длительность: {duration} секунд | Громкость: {int(volume*100)}%")
         
         # Визуализация
-        st.header("📊 Визуализация")
+        st.subheader("📊 Визуализация")
         
-        tab1, tab2, tab3 = st.tabs(["Форма волны", "Спектр мощности", "Спектрограмма"])
+        tab1, tab2 = st.tabs(["Форма волны", "Спектр"])
         
         with tab1:
-            # Показываем первые несколько секунд волны
-            samples_to_show = min(st.session_state.generator.sample_rate * 2, 
-                                 len(st.session_state.generator.noise))
-            time_axis = np.linspace(0, samples_to_show/st.session_state.generator.sample_rate, 
-                                  samples_to_show)
+            # График формы волны
+            samples_to_show = min(sample_rate * 2, len(st.session_state.generator.noise))
+            time_axis = np.linspace(0, samples_to_show/sample_rate, samples_to_show)
             
             fig = go.Figure()
             fig.add_trace(go.Scatter(
@@ -305,186 +253,105 @@ def main():
                 y=st.session_state.generator.noise[:samples_to_show],
                 mode='lines',
                 name='Розовый шум',
-                line=dict(color='pink', width=0.5)
+                line=dict(color='pink', width=1)
             ))
             fig.update_layout(
-                title="Форма волны (первые 2 секунды)",
                 xaxis_title="Время (сек)",
                 yaxis_title="Амплитуда",
-                height=400,
-                template="plotly_white"
+                height=300,
+                showlegend=False,
+                margin=dict(l=0, r=0, t=0, b=0)
             )
             st.plotly_chart(fig, use_container_width=True)
         
         with tab2:
-            freqs, spectrum_db = st.session_state.generator.get_spectrum()
-            if freqs is not None:
-                # Ограничиваем частоты для лучшей визуализации
-                mask = (freqs > 10) & (freqs < 5000)
+            # Спектр
+            noise_data = st.session_state.generator.noise
+            fft_data = np.fft.rfft(noise_data)
+            freqs = np.fft.rfftfreq(len(noise_data), 1/sample_rate)
+            
+            # Усредняем спектр для сглаживания
+            window_size = len(freqs) // 100
+            if window_size > 1:
+                power = np.abs(fft_data) ** 2
+                # Простое скользящее среднее
+                power_smooth = np.convolve(power, np.ones(window_size)/window_size, mode='valid')
+                freqs_smooth = freqs[:len(power_smooth)]
+                
+                # Ограничиваем частоты для визуализации
+                mask = (freqs_smooth > 20) & (freqs_smooth < 2000)
                 
                 fig = go.Figure()
-                
-                # Спектр розового шума
                 fig.add_trace(go.Scatter(
-                    x=freqs[mask],
-                    y=spectrum_db[mask],
+                    x=freqs_smooth[mask],
+                    y=10 * np.log10(power_smooth[mask] + 1e-10),
                     mode='lines',
                     name='Спектр мощности',
-                    line=dict(color='blue', width=1)
+                    line=dict(color='blue', width=2)
                 ))
                 
-                # Теоретическая линия 1/f
-                if generation_method == "FFT метод (точный)":
-                    theoretical = -10 * alpha * np.log10(freqs[mask]/freqs[mask][0])
-                    theoretical = theoretical - np.mean(theoretical) + np.mean(spectrum_db[mask])
-                    
-                    fig.add_trace(go.Scatter(
-                        x=freqs[mask],
-                        y=theoretical,
-                        mode='lines',
-                        name=f'Теоретический 1/f^{alpha:.1f}',
-                        line=dict(color='red', width=2, dash='dash')
-                    ))
+                # Добавляем теоретическую линию 1/f
+                theoretical_1f = -10 * np.log10(freqs_smooth[mask] / freqs_smooth[mask][0])
+                theoretical_1f = theoretical_1f - np.mean(theoretical_1f) + np.mean(10 * np.log10(power_smooth[mask] + 1e-10))
                 
+                fig.add_trace(go.Scatter(
+                    x=freqs_smooth[mask],
+                    y=theoretical_1f,
+                    mode='lines',
+                    name='Идеальный 1/f',
+                    line=dict(color='red', width=1, dash='dash')
+                ))
+                
+                fig.update_xaxes(type="log", title="Частота (Гц)")
+                fig.update_yaxes(title="Мощность (дБ)")
                 fig.update_layout(
-                    title="Спектр мощности (логарифмические координаты)",
-                    xaxis_title="Частота (Гц)",
-                    yaxis_title="Мощность (дБ)",
-                    xaxis_type="log",
-                    height=400,
+                    height=300,
                     showlegend=True,
-                    template="plotly_white"
+                    margin=dict(l=0, r=0, t=0, b=0)
                 )
                 st.plotly_chart(fig, use_container_width=True)
-                
-                # Показываем наклон спектра
-                log_freqs = np.log10(freqs[mask])
-                slope, intercept, r_value, p_value, std_err = stats.linregress(
-                    log_freqs, spectrum_db[mask]
-                )
-                
-                expected_slope = -10 * (alpha if generation_method == "FFT метод (точный)" else 1.0)
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Измеренный наклон", f"{slope:.2f} дБ/декада")
-                with col2:
-                    st.metric("Теоретический наклон", f"{expected_slope:.1f} дБ/декада")
-                with col3:
-                    st.metric("Коэффициент корреляции", f"{r_value**2:.3f}")
-        
-        with tab3:
-            # Спектрограмма
-            f, t, Sxx = signal.spectrogram(
-                st.session_state.generator.noise, 
-                st.session_state.generator.sample_rate,
-                nperseg=1024,
-                noverlap=512
-            )
-            
-            # Ограничиваем частоты
-            freq_mask = f < 5000
-            f_limited = f[freq_mask]
-            Sxx_limited = Sxx[freq_mask, :]
-            
-            fig = go.Figure(data=go.Heatmap(
-                x=t,
-                y=f_limited,
-                z=10 * np.log10(Sxx_limited + 1e-10),
-                colorscale='Viridis',
-                colorbar=dict(title="Мощность (дБ)"),
-                zmin=-60,
-                zmax=0
-            ))
-            
-            fig.update_layout(
-                title="Спектрограмма",
-                xaxis_title="Время (сек)",
-                yaxis_title="Частота (Гц)",
-                height=400,
-                template="plotly_white"
-            )
-            st.plotly_chart(fig, use_container_width=True)
         
         # Скачивание
-        st.header("💾 Сохранение")
+        st.subheader("💾 Сохранение")
         
         col1, col2 = st.columns(2)
-        
         with col1:
             wav_buffer = st.session_state.generator.save_wav(volume)
             if wav_buffer:
                 st.download_button(
-                    label="📥 Скачать WAV файл",
+                    label="📥 Скачать WAV",
                     data=wav_buffer,
-                    file_name=f"pink_noise_{int(time.time())}.wav",
+                    file_name=f"pink_noise_{duration}s.wav",
                     mime="audio/wav",
                     use_container_width=True
                 )
         
         with col2:
-            # Информация о файле
-            st.info(f"""
-            **Информация о файле:**
-            - Формат: WAV (несжатый)
-            - Длительность: {duration} сек
-            - Частота: {sample_rate} Гц
-            - Разрядность: 16 бит
-            - Каналы: Моно
-            - Размер: ~{duration * sample_rate * 2 / 1024 / 1024:.1f} МБ
-            """)
+            file_size = duration * sample_rate * 2 / 1024 / 1024
+            st.info(f"Размер: ~{file_size:.1f} МБ")
     
-    # Информационная секция
-    with st.expander("ℹ️ О розовом шуме и его применении"):
+    # Информация
+    with st.expander("ℹ️ О розовом шуме"):
         st.markdown("""
-        ### Что такое розовый шум?
+        **Розовый шум** имеет спектр мощности, обратно пропорциональный частоте (1/f).
         
-        Розовый шум (также известный как 1/f шум или фликкер-шум) - это сигнал, 
-        спектральная плотность мощности которого обратно пропорциональна частоте:
+        **Применение:**
+        - 🧘 **Медитация** - создает спокойный фон
+        - 😴 **Сон** - маскирует посторонние звуки
+        - 🎯 **Фокусировка** - помогает концентрации
+        - 👶 **Для младенцев** - успокаивающий эффект
         
-        **W(f) = W(1) / f^α**
+        **Природные примеры:**
+        - Шум дождя
+        - Звук водопада
+        - Шелест листьев
+        - Морской прибой
         
-        где α ≈ 1 для классического розового шума.
-        
-        ### Почему розовый шум эффективен для медитации?
-        
-        1. **Естественность**: Розовый шум встречается во многих природных процессах:
-           - Шум водопада
-           - Морской прибой  
-           - Шелест листьев
-           - Сердечный ритм
-        
-        2. **Баланс частот**: В отличие от белого шума, розовый шум имеет больше энергии 
-           на низких частотах, что делает его более приятным для восприятия
-        
-        3. **Научные исследования**: Показано, что розовый шум:
-           - Улучшает глубокий сон
-           - Способствует консолидации памяти
-           - Снижает время засыпания
-           - Маскирует отвлекающие звуки
-        
-        ### Рекомендации по использованию:
-        
-        - **Для медитации**: 10-20 минут, громкость 30-40%
-        - **Для сна**: 30+ минут с таймером выключения, громкость 20-30%
-        - **Для концентрации**: Непрерывно во время работы, громкость 25-35%
-        - **Начинайте с низкой громкости** и постепенно увеличивайте до комфортного уровня
-        - **Используйте качественные наушники или колонки** для лучшего эффекта
-        
-        ### Типы шума по спектру:
-        
-        - **Белый шум** (f^0): Равная мощность на всех частотах
-        - **Розовый шум** (1/f): Мощность падает на 3 дБ на октаву
-        - **Коричневый шум** (1/f²): Мощность падает на 6 дБ на октаву
-        
-        Розовый шум находится посередине и часто воспринимается как наиболее 
-        естественный и комфортный для длительного прослушивания.
+        **Рекомендации:**
+        - Начинайте с низкой громкости
+        - Используйте 10-30 минут для медитации
+        - Для сна можно оставить на всю ночь
         """)
-    
-    # Footer
-    st.markdown("---")
-    st.markdown("*🧘 Создано для практики медитации и улучшения концентрации*")
-    st.markdown("*Используйте розовый шум ответственно и не превышайте безопасный уровень громкости*")
 
 if __name__ == "__main__":
     main()
