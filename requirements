@@ -1,6 +1,5 @@
-streamlit==1.32.0
-numpy==1.24.3
-scipy==1.11.4
-sounddevice==0.4.6
-matplotlib==3.8.0
-plotly==5.18.0
+streamlit
+numpy
+scipy
+matplotlib
+plotly
