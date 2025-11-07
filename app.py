@@ -1,8 +1,7 @@
 import streamlit as st
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Важно для Streamlit!
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from scipy import signal
 from scipy.io import wavfile
 import io
@@ -109,28 +108,47 @@ def main():
             
             with col1:
                 st.subheader("Временная форма сигнала")
-                fig1, ax1 = plt.subplots(figsize=(10, 4))
                 time = np.linspace(0, duration, len(pink_noise))
-                ax1.plot(time, pink_noise, color='#FF69B4', linewidth=0.5)
-                ax1.set_xlabel("Время (с)")
-                ax1.set_ylabel("Амплитуда")
-                ax1.set_title("Розовый шум (временная область)")
-                ax1.grid(True, alpha=0.3)
-                st.pyplot(fig1)
-                plt.close()
+                
+                fig1 = go.Figure()
+                fig1.add_trace(go.Scatter(
+                    x=time, 
+                    y=pink_noise,
+                    mode='lines',
+                    line=dict(color='#FF69B4', width=1),
+                    name='Розовый шум'
+                ))
+                fig1.update_layout(
+                    xaxis_title="Время (с)",
+                    yaxis_title="Амплитуда",
+                    title="Розовый шум (временная область)",
+                    template="plotly_white",
+                    height=400
+                )
+                st.plotly_chart(fig1, use_container_width=True)
             
             with col2:
                 st.subheader("Спектральная плотность мощности")
                 freqs, psd = analyze_spectrum(pink_noise, sample_rate)
                 
-                fig2, ax2 = plt.subplots(figsize=(10, 4))
-                ax2.loglog(freqs[1:], psd[1:], color='#FF1493', linewidth=2)
-                ax2.set_xlabel("Частота (Гц)")
-                ax2.set_ylabel("Мощность")
-                ax2.set_title("Спектр (должен иметь наклон ~-1 для розового шума)")
-                ax2.grid(True, alpha=0.3, which="both")
-                st.pyplot(fig2)
-                plt.close()
+                fig2 = go.Figure()
+                fig2.add_trace(go.Scatter(
+                    x=freqs[1:], 
+                    y=psd[1:],
+                    mode='lines',
+                    line=dict(color='#FF1493', width=2),
+                    name='PSD'
+                ))
+                fig2.update_layout(
+                    xaxis_title="Частота (Гц)",
+                    yaxis_title="Мощность",
+                    title="Спектр (должен иметь наклон ~-1 для розового шума)",
+                    template="plotly_white",
+                    xaxis_type="log",
+                    yaxis_type="log",
+                    height=400
+                )
+                st.plotly_chart(fig2, use_container_width=True)
             
             # Статистика
             st.subheader("📊 Статистика сигнала")
@@ -193,15 +211,23 @@ def main():
             bs_demo.evolve_step()
             fitness_history.append(bs_demo.fitness.copy())
         
-        fig3, ax3 = plt.subplots(figsize=(12, 6))
         fitness_array = np.array(fitness_history)
-        im = ax3.imshow(fitness_array.T, aspect='auto', cmap='plasma', interpolation='nearest')
-        ax3.set_xlabel("Шаг эволюции")
-        ax3.set_ylabel("ID вида")
-        ax3.set_title("Эволюция приспособленности видов (яркие = высокая приспособленность)")
-        plt.colorbar(im, ax=ax3, label="Fitness")
-        st.pyplot(fig3)
-        plt.close()
+        
+        fig3 = go.Figure(data=go.Heatmap(
+            z=fitness_array.T,
+            colorscale='Plasma',
+            colorbar=dict(title="Fitness")
+        ))
+        
+        fig3.update_layout(
+            xaxis_title="Шаг эволюции",
+            yaxis_title="ID вида",
+            title="Эволюция приспособленности видов (яркие = высокая приспособленность)",
+            template="plotly_white",
+            height=500
+        )
+        
+        st.plotly_chart(fig3, use_container_width=True)
 
 
 if __name__ == "__main__":
